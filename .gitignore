@@ -1,0 +1,6 @@
+.venv
+.env
+.rooignore
+uv.lock
+main_gradio.py
+main_ui.py
