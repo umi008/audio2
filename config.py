@@ -33,10 +33,15 @@ class Settings(BaseSettings):
         env_file = ".env"
         case_sensitive = True
         
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Generar el nombre del archivo de log una sola vez durante la inicialización
+        self._log_file_with_timestamp = f"{self.LOG_FILE}.{datetime.now().strftime('%Y.%m.%d_%H.%M.%S')}.log"
+
     @property
     def log_file_with_timestamp(self) -> str:
-        """Genera el nombre del archivo de log con timestamp actual"""
-        return f"{self.LOG_FILE}.{datetime.now().strftime('%Y.%m.%d_%H.%M.%S')}.log"
+        """Retorna el nombre del archivo de log generado al inicio de la ejecución"""
+        return self._log_file_with_timestamp
 
 
 @lru_cache()

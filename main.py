@@ -20,12 +20,15 @@ if not settings.OPENAI_API_KEY:
     print("Error: Falta OPENAI_API_KEY")
     sys.exit(1)
 
-def log_event(event_type, payload):
+def log_turn_data(timestamp, latency_ms, user_transcript, ai_transcript, usage):
     entry = {
-        "timestamp": datetime.now().isoformat(),
-        "timestamp_unix": time.time(),
-        "event_type": event_type,
-        "data": payload
+        "timestamp": timestamp,
+        "turn_data": {
+            "latency_ms": latency_ms,
+            "user_transcript": user_transcript,
+            "ai_transcript": ai_transcript,
+            "usage": usage
+        }
     }
     try:
         with open(settings.log_file_with_timestamp, "a", encoding="utf-8") as f:
@@ -65,6 +68,11 @@ async def realtime_api():
         prompt = get_prompt(settings.PROMPT_FILE) if settings.PROMPT_FILE else ""
         session_config = {
             "modalities": ["audio", "text"],
+            "input_audio_transcription": {
+                "model": "gpt-4o-transcribe"
+                # "prompt": "",  # Opcional
+                # "language": "" # Opcional
+            },
             "voice": settings.VOICE,
             "instructions": prompt,
             "turn_detection": {
@@ -72,8 +80,11 @@ async def realtime_api():
                 "threshold": settings.THRESHOLD,
                 "prefix_padding_ms": settings.PREFIX_PADDING_MS,
                 "silence_duration_ms": settings.SILENCE_DURATION_MS,
-                "create_response": True, # Auto respuesta al detectar silencio
-                "interrupt_response": False  # Permitir interrupciones
+                "create_response": True,
+                "interrupt_response": False
+            },
+            "input_audio_noise_reduction": {
+                "type": "near_field"
             }
         }
         
@@ -82,8 +93,13 @@ async def realtime_api():
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
-        # --- VARIABLE DE CONTROL DE ESTADO ---
+        # --- VARIABLES DE ESTADO PARA LOGGING DE TURNO ---
         ai_is_speaking = False
+        turn_start_timestamp = None
+        user_transcript = None
+        ai_transcript = None
+        usage_data = None
+        latency_ms = None
 
         async def receive_audio():
             nonlocal ai_is_speaking
@@ -111,16 +127,46 @@ async def realtime_api():
 
                     # 3. TRANSCRIPCIONES
                     elif event_type == "response.audio_transcript.done":
-                        print(f"🤖 AI: {data['transcript']}")
+                        ai_transcript = data['transcript']
+                        print(f"🤖 AI: {ai_transcript}")
 
                     elif event_type == "conversation.item.input_audio_transcription.completed":
-                        print(f"📝 Tú: {data['transcript']}")
+                        user_transcript = data['transcript']
+                        turn_start_timestamp = datetime.now().isoformat()
+                        print(f"📝 Tú: {user_transcript}")
 
                     # 4. LA IA TERMINÓ LA RESPUESTA (Desbloqueamos micro)
                     elif event_type == "response.done":
                         ai_is_speaking = False
                         print("🎤 Turno terminado. Puedes hablar ahora.\n")
-                        log_event("ai_turn_complete", {})
+                        # Captura datos de uso y latencia si existen
+                        usage_data = data.get("usage")
+                        if usage_data is None:
+                            usage_data = data.get("item", {}).get("usage")
+                        if usage_data is None:
+                            usage_data = data.get("response", {}).get("usage")
+                        # Si sigue siendo None, asigna valores por defecto
+                        if usage_data is None:
+                            usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                        if turn_start_timestamp:
+                            dt_start = datetime.fromisoformat(turn_start_timestamp)
+                            dt_end = datetime.now()
+                            latency_ms = (dt_end - dt_start).total_seconds() * 1000
+                        else:
+                            latency_ms = None
+                        log_turn_data(
+                            datetime.now().isoformat(),
+                            latency_ms,
+                            user_transcript,
+                            ai_transcript,
+                            usage_data
+                        )
+                        # Reset variables de estado
+                        turn_start_timestamp = None
+                        user_transcript = None
+                        ai_transcript = None
+                        usage_data = None
+                        latency_ms = None
 
                     elif event_type == "error":
                         print(f"❌ Error: {data['error']['message']}")
