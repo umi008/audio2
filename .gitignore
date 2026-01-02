@@ -5,3 +5,5 @@
 uv.lock
 main_gradio.py
 main_ui.py
+*.pyc
+config.cpython-3.11.pyc

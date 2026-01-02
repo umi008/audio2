@@ -68,6 +68,7 @@ async def realtime_api():
         prompt = get_prompt(settings.PROMPT_FILE) if settings.PROMPT_FILE else ""
         session_config = {
             "modalities": ["audio", "text"],
+            "input_audio_format": "pcm16",
             "input_audio_transcription": {
                 "model": "gpt-4o-transcribe"
                 # "prompt": "",  # Opcional
@@ -84,8 +85,11 @@ async def realtime_api():
                 "interrupt_response": False
             },
             "input_audio_noise_reduction": {
-                "type": "near_field"
-            }
+                "type": "near_field" # Opciones: near_field, far_field, none
+            },
+            #"include": [ 
+                #"item.input_audio_transcription.logprobs",
+                #],| null
         }
         
         await ws.send(json.dumps({"type": "session.update", "session": session_config}))
@@ -213,4 +217,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(realtime_api())
     except KeyboardInterrupt:
-        print("\n👋 Fin.")
+        print("\nFin")
