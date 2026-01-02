@@ -19,11 +19,11 @@ if not settings.OPENAI_API_KEY:
     print("Error: Falta OPENAI_API_KEY")
     sys.exit(1)
 
-def log_turn_data(timestamp, latency_ms, user_transcript, ai_transcript, usage):
+def log_turn_data(timestamp, ttfb_ms, user_transcript, ai_transcript, usage):
     entry = {
         "timestamp": timestamp,
         "turn_data": {
-            "latency_ms": latency_ms,
+            "latency_ms": ttfb_ms,
             "user_transcript": user_transcript,
             "ai_transcript": ai_transcript,
             "usage": usage
@@ -83,10 +83,12 @@ async def realtime_api():
         user_transcript = None
         ai_transcript = None
         usage_data = None
-        latency_ms = None
+        ttfb_ms = None
 
         async def receive_audio():
-            nonlocal ai_is_speaking, turn_start_timestamp, user_transcript, ai_transcript, usage_data, latency_ms
+            nonlocal ai_is_speaking, turn_start_timestamp, user_transcript, ai_transcript, usage_data, ttfb_ms
+            ttfb_start = None
+            first_audio_received = False
             while not stop_event.is_set():
                 try:
                     message = await ws.recv()
@@ -95,10 +97,17 @@ async def realtime_api():
                     if event_type == "response.created":
                         if not ai_is_speaking:
                             ai_is_speaking = True
+                            ttfb_start = datetime.now()
                             print("\n🔇 IA hablando - Micrófono silenciado temporalmente...")
                     elif event_type == "response.audio.delta":
                         if not ai_is_speaking:
                             ai_is_speaking = True
+                            if ttfb_start is None:
+                                ttfb_start = datetime.now()
+                        # Calcular TTFB solo para el primer chunk de audio
+                        if not first_audio_received:
+                            ttfb_ms = (datetime.now() - ttfb_start).total_seconds() * 1000
+                            first_audio_received = True
                         audio_chunk = base64.b64decode(data["delta"])
                         speaker_stream.write(audio_chunk)
                     elif event_type == "response.audio_transcript.done":
@@ -111,6 +120,7 @@ async def realtime_api():
                     elif event_type == "response.done":
                         ai_is_speaking = False
                         print("🎤 Turno terminado. Puedes hablar ahora.\n")
+                        #print("DEBUG response.done:", json.dumps(data, indent=2, ensure_ascii=False))
                         usage_data = data.get("usage")
                         if usage_data is None:
                             usage_data = data.get("item", {}).get("usage")
@@ -118,15 +128,12 @@ async def realtime_api():
                             usage_data = data.get("response", {}).get("usage")
                         if usage_data is None:
                             usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                        if turn_start_timestamp:
-                            dt_start = datetime.fromisoformat(turn_start_timestamp)
-                            dt_end = datetime.now()
-                            latency_ms = (dt_end - dt_start).total_seconds() * 1000
-                        else:
-                            latency_ms = None
+                        # TTFB ya fue calculado al recibir el primer audio delta
+                        if not first_audio_received and ttfb_start is not None:
+                            ttfb_ms = round((datetime.now() - ttfb_start).total_seconds() * 1000, 2)
                         log_turn_data(
                             datetime.now().isoformat(),
-                            latency_ms,
+                            ttfb_ms,
                             user_transcript,
                             ai_transcript,
                             usage_data
@@ -135,7 +142,9 @@ async def realtime_api():
                         user_transcript = None
                         ai_transcript = None
                         usage_data = None
-                        latency_ms = None
+                        ttfb_ms = None
+                        ttfb_start = None
+                        first_audio_received = False
                     elif event_type == "error":
                         print(f"❌ Error: {data['error']['message']}")
                 except websockets.exceptions.ConnectionClosed:
