@@ -2,19 +2,18 @@ import asyncio
 import websockets
 import json
 import base64
-import pyaudio
 import sys
-import time
 from datetime import datetime
 from config import get_settings
+from audio.manager import AudioManager
+from audio.constants import FORMAT, CHANNELS, RATE, CHUNK
+from prompts.loader import load_prompt
+from logging_modules.conversation_logger import ConversationLogger
+from state.conversation_state import ConversationState
+from api.session_config import create_session_config
+from utils.helpers import read_audio_blocking
 
 settings = get_settings()
-
-# AUDIO
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 24000
-CHUNK = 2048
 
 if not settings.OPENAI_API_KEY:
     print("Error: Falta OPENAI_API_KEY")
@@ -36,28 +35,17 @@ def log_turn_data(timestamp, latency_ms, user_transcript, ai_transcript, usage):
     except Exception:
         pass
 
-
-def get_prompt(prompt_path):
-    try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return ""
-def read_audio_blocking(stream, chunk):
-    return stream.read(chunk, exception_on_overflow=False)
-
 async def realtime_api():
-    p = pyaudio.PyAudio()
-
+    audio_manager = AudioManager()
     try:
-        mic_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True,
-                            input_device_index=settings.MIC_INDEX, frames_per_buffer=CHUNK)
-        speaker_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True,
-                                output_device_index=settings.SPEAKER_INDEX, frames_per_buffer=CHUNK)
+        mic_stream = audio_manager.p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True,
+                                          input_device_index=settings.MIC_INDEX, frames_per_buffer=CHUNK)
+        speaker_stream = audio_manager.p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True,
+                                              output_device_index=settings.SPEAKER_INDEX, frames_per_buffer=CHUNK)
     except Exception as e:
         print(f"❌ Error de Hardware: {e}")
         return
-    
+
     headers = {
         "Authorization": "Bearer " + settings.OPENAI_API_KEY,
         "OpenAI-Beta": "realtime=v1"
@@ -65,14 +53,13 @@ async def realtime_api():
 
     async with websockets.connect(settings.MODEL_URL, additional_headers=headers) as ws:
         print("✅ CONECTADO.\n")
-        prompt = get_prompt(settings.PROMPT_FILE) if settings.PROMPT_FILE else ""
+        with open(settings.PROMPT_FILE, 'r', encoding='utf-8') as f:
+            prompt = f.read()
         session_config = {
             "modalities": ["audio", "text"],
             "input_audio_format": "pcm16",
             "input_audio_transcription": {
                 "model": "gpt-4o-transcribe"
-                # "prompt": "",  # Opcional
-                # "language": "" # Opcional
             },
             "voice": settings.VOICE,
             "instructions": prompt,
@@ -85,19 +72,12 @@ async def realtime_api():
                 "interrupt_response": False
             },
             "input_audio_noise_reduction": {
-                "type": "near_field" # Opciones: near_field, far_field, none
+                "type": "near_field"
             },
-            #"include": [ 
-                #"item.input_audio_transcription.logprobs",
-                #],| null
         }
-        
         await ws.send(json.dumps({"type": "session.update", "session": session_config}))
-        
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
-
-        # --- VARIABLES DE ESTADO PARA LOGGING DE TURNO ---
         ai_is_speaking = False
         turn_start_timestamp = None
         user_transcript = None
@@ -106,50 +86,36 @@ async def realtime_api():
         latency_ms = None
 
         async def receive_audio():
-            nonlocal ai_is_speaking
-            
+            nonlocal ai_is_speaking, turn_start_timestamp, user_transcript, ai_transcript, usage_data, latency_ms
             while not stop_event.is_set():
                 try:
                     message = await ws.recv()
                     data = json.loads(message)
                     event_type = data["type"]
-
-                    # 1. LA IA COMIENZA A RESPONDER (Bloqueamos micro)
                     if event_type == "response.created":
                         if not ai_is_speaking:
                             ai_is_speaking = True
                             print("\n🔇 IA hablando - Micrófono silenciado temporalmente...")
-
-                    # 2. AUDIO ENTRANTE
                     elif event_type == "response.audio.delta":
-                        # Aseguramos que esté marcado como hablando
-                        if not ai_is_speaking: 
-                             ai_is_speaking = True
-                        
+                        if not ai_is_speaking:
+                            ai_is_speaking = True
                         audio_chunk = base64.b64decode(data["delta"])
                         speaker_stream.write(audio_chunk)
-
-                    # 3. TRANSCRIPCIONES
                     elif event_type == "response.audio_transcript.done":
                         ai_transcript = data['transcript']
                         print(f"🤖 AI: {ai_transcript}")
-
                     elif event_type == "conversation.item.input_audio_transcription.completed":
                         user_transcript = data['transcript']
                         turn_start_timestamp = datetime.now().isoformat()
                         print(f"📝 Tú: {user_transcript}")
-
-                    # 4. LA IA TERMINÓ LA RESPUESTA (Desbloqueamos micro)
                     elif event_type == "response.done":
                         ai_is_speaking = False
                         print("🎤 Turno terminado. Puedes hablar ahora.\n")
-                        # Captura datos de uso y latencia si existen
                         usage_data = data.get("usage")
                         if usage_data is None:
                             usage_data = data.get("item", {}).get("usage")
                         if usage_data is None:
                             usage_data = data.get("response", {}).get("usage")
-                        # Si sigue siendo None, asigna valores por defecto
                         if usage_data is None:
                             usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                         if turn_start_timestamp:
@@ -165,16 +131,13 @@ async def realtime_api():
                             ai_transcript,
                             usage_data
                         )
-                        # Reset variables de estado
                         turn_start_timestamp = None
                         user_transcript = None
                         ai_transcript = None
                         usage_data = None
                         latency_ms = None
-
                     elif event_type == "error":
                         print(f"❌ Error: {data['error']['message']}")
-
                 except websockets.exceptions.ConnectionClosed:
                     stop_event.set()
                     break
@@ -184,19 +147,11 @@ async def realtime_api():
 
         async def send_audio():
             print("🎤 MICRO ACTIVADO (Esperando tu voz...)")
-            
             while not stop_event.is_set():
                 try:
-                    # SIEMPRE leemos del hardware para evitar desbordamiento del buffer
                     data = await loop.run_in_executor(None, read_audio_blocking, mic_stream, CHUNK)
-                    
-                    # LÓGICA DE BLOQUEO:
-                    # Si la IA está hablando, ignoramos los datos (continue)
-                    # No enviamos nada al socket
                     if ai_is_speaking:
                         continue
-
-                    # Si la IA calla, enviamos audio
                     base64_audio = base64.b64encode(data).decode("utf-8")
                     await ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
@@ -208,10 +163,9 @@ async def realtime_api():
                     break
 
         await asyncio.gather(receive_audio(), send_audio())
-
     mic_stream.stop_stream(); mic_stream.close()
     speaker_stream.stop_stream(); speaker_stream.close()
-    p.terminate()
+    audio_manager.terminate()
 
 if __name__ == "__main__":
     try:

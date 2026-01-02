@@ -1,0 +1,4 @@
+FORMAT = 8  # pyaudio.paInt16
+CHANNELS = 1
+RATE = 24000
+CHUNK = 1024
