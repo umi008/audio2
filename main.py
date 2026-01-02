@@ -1,4 +1,3 @@
-import os
 import asyncio
 import websockets
 import json
@@ -7,23 +6,9 @@ import pyaudio
 import sys
 import time
 from datetime import datetime
-from dotenv import load_dotenv
+from config import get_settings
 
-load_dotenv()
-
-# --- CONFIGURACIÓN ---
-API_KEY = os.getenv("OPENAI_API_KEY")
-URL = os.getenv("MODEL_URL", "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview")
-VOICE = os.getenv("VOICE", "alloy")
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-SYSTEM_PROMPT_PATH = os.getenv("PROMPT_FILE", "")
-THRESHOLD = float(os.getenv("THRESHOLD", "0.99"))
-PREFIX_PADDING_MS = int(os.getenv("PREFIX_PADDING_MS", "300"))
-SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "3000"))
-
-# HARDWARE
-MIC_INDEX = 1        
-SPEAKER_INDEX = None 
+settings = get_settings()
 
 # AUDIO
 FORMAT = pyaudio.paInt16
@@ -31,10 +16,7 @@ CHANNELS = 1
 RATE = 24000
 CHUNK = 2048
 
-# NOMBRE DEL ARCHIVO LOG
-LOG_FILENAME = f"conversation_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-
-if not API_KEY:
+if not settings.OPENAI_API_KEY:
     print("Error: Falta OPENAI_API_KEY")
     sys.exit(1)
 
@@ -46,10 +28,11 @@ def log_event(event_type, payload):
         "data": payload
     }
     try:
-        with open(LOG_FILENAME, "a", encoding="utf-8") as f:
+        with open(settings.log_file_with_timestamp, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
 
 def get_prompt(prompt_path):
     try:
@@ -57,7 +40,6 @@ def get_prompt(prompt_path):
             return f.read()
     except Exception:
         return ""
-
 def read_audio_blocking(stream, chunk):
     return stream.read(chunk, exception_on_overflow=False)
 
@@ -66,30 +48,32 @@ async def realtime_api():
 
     try:
         mic_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True,
-                            input_device_index=MIC_INDEX, frames_per_buffer=CHUNK)
+                            input_device_index=settings.MIC_INDEX, frames_per_buffer=CHUNK)
         speaker_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True,
-                                output_device_index=SPEAKER_INDEX, frames_per_buffer=CHUNK)
+                                output_device_index=settings.SPEAKER_INDEX, frames_per_buffer=CHUNK)
     except Exception as e:
         print(f"❌ Error de Hardware: {e}")
         return
     
     headers = {
-        "Authorization": "Bearer " + API_KEY,
+        "Authorization": "Bearer " + settings.OPENAI_API_KEY,
         "OpenAI-Beta": "realtime=v1"
     }
 
-    async with websockets.connect(URL, additional_headers=headers) as ws:
+    async with websockets.connect(settings.MODEL_URL, additional_headers=headers) as ws:
         print("✅ CONECTADO.\n")
-        prompt = get_prompt(SYSTEM_PROMPT_PATH) if SYSTEM_PROMPT_PATH else ""
+        prompt = get_prompt(settings.PROMPT_FILE) if settings.PROMPT_FILE else ""
         session_config = {
             "modalities": ["audio", "text"],
-            "voice": VOICE,
+            "voice": settings.VOICE,
             "instructions": prompt,
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": THRESHOLD,
-                "prefix_padding_ms": PREFIX_PADDING_MS,
-                "silence_duration_ms": SILENCE_DURATION_MS
+                "threshold": settings.THRESHOLD,
+                "prefix_padding_ms": settings.PREFIX_PADDING_MS,
+                "silence_duration_ms": settings.SILENCE_DURATION_MS,
+                "create_response": True, # Auto respuesta al detectar silencio
+                "interrupt_response": False  # Permitir interrupciones
             }
         }
         

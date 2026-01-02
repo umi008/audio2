@@ -42,6 +42,7 @@ dependencies = [
     "pycparser==2.23",
     "pydantic==2.12.5",
     "pydantic-core==2.41.5",
+    "pydantic-settings>=2.7.1",
     "pydub==0.25.1",
     "pygments==2.19.2",
     "python-dateutil==2.9.0.post0",
